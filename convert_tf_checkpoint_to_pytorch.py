@@ -24,7 +24,7 @@ import tensorflow as tf
 import torch
 import numpy as np
 
-from modeling import BertConfig, BertModel
+from modeling import BertConfig, BertModel, BertForSequenceClassification, BertForQuestionAnswering
 
 parser = argparse.ArgumentParser()
 
@@ -40,6 +40,12 @@ parser.add_argument("--bert_config_file",
                     required = True,
                     help = "The config json file corresponding to the pre-trained BERT model. \n"
                         "This specifies the model architecture.")
+parser.add_argument("--bert_model_type",
+                    default = None,
+                    type = str,
+                    required = True,
+                    choices = ['feature_extractor', 'classifier', 'question_answering'],
+                    help = "BERT model type.")
 parser.add_argument("--pytorch_dump_path",
                     default = None,
                     type = str,
@@ -51,7 +57,6 @@ args = parser.parse_args()
 def convert():
     # Initialise PyTorch model
     config = BertConfig.from_json_file(args.bert_config_file)
-    model = BertModel(config)
 
     # Load weights from TF model
     path = args.tf_checkpoint_path
@@ -60,22 +65,49 @@ def convert():
     init_vars = tf.train.list_variables(path)
     names = []
     arrays = []
+    classifier_classes = 0
     for name, shape in init_vars:
         print("Loading {} with shape {}".format(name, shape))
         array = tf.train.load_variable(path, name)
         print("Numpy array shape {}".format(array.shape))
         names.append(name)
+        if name == 'output_bias':
+            classifier_classes = int(array.shape[0])
         arrays.append(array)
 
+    if args.bert_model_type == 'classifier':
+        model = BertForSequenceClassification(config, classifier_classes)
+    else:
+        model = BertModel(config)
+
     for name, array in zip(names, arrays):
+        first_name = name.split('/')[0]
+        print("Parsing {}".format(name))
         name = name[5:]  # skip "bert/"
-        print("Loading {}".format(name))
         name = name.split('/')
         if name[0] in ['redictions', 'eq_relationship']:
-            print("Skipping")
+            print("Skipping", name[0])
             continue
+        if 'adam' in name[-1]:
+            print("Skipping adam")
+            continue
+        if first_name == 'global_step':
+            # global step
+            print("Skipping global_step")
+            continue
+        if first_name in ['output_weights', 'output_bias']:
+            # final classifier layer output
+            name = [first_name]
         pointer = model
+        if args.bert_model_type == 'classifier':
+            pointer = pointer.bert
         for m_name in name:
+            if m_name == 'output_weights':
+                pointer = model.classifier.weight
+                break
+            if m_name == 'output_bias':
+                pointer = model.classifier.bias
+                break
             if re.fullmatch(r'[A-Za-z]+_\d+', m_name):
                 l = re.split(r'_(\d+)', m_name)
             else:
